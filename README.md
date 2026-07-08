@@ -28,6 +28,16 @@ Inputs:
 - `map_location`: device string such as `cpu` or `cuda:0`
 - `strict`: whether to require an exact key match when loading weights
 
+### Load TorchVision ResNet18
+Loads a torchvision `resnet18` model, optionally with ImageNet pretrained
+weights.
+
+Inputs:
+- `pretrained`: load `ResNet18_Weights.IMAGENET1K_V1` when enabled
+
+If `pretrained` is enabled, torchvision will download the weights the first
+time the node runs unless they are already cached locally.
+
 ### DCT Compress CNN
 Replaces `nn.Conv2d` and `nn.Linear` layers with DCT-compressed wrappers.
 Lower-frequency bands receive more of the parameter budget than higher-frequency
@@ -64,7 +74,8 @@ Inputs:
 ## Usage
 
 1. Load a model with `Load Torch CNN Model`, or load a checkpoint with
-   `Load Torch Model From State Dict`.
+   `Load Torch Model From State Dict`, or load a pretrained backbone with
+   `Load TorchVision ResNet18`.
 2. Connect the model to `DCT Compress CNN`.
 3. Optionally save the compressed model with `Save Torch Model`.
 4. Use `Run Torch Model Inference` to execute the model on a tensor.
@@ -91,4 +102,3 @@ accordingly, for example `model_state_dict`.
 - Set `freeze_parameters=False` if you want the shared DCT parameters to stay
   trainable for fine-tuning.
 - The inference node expects the model output to be a single `torch.Tensor`.
-

@@ -308,6 +308,25 @@ def _save_model(module: nn.Module, output_path: str, file_name: str, save_to_cpu
     return str(candidate)
 
 
+def _load_torchvision_resnet18(pretrained: bool) -> nn.Module:
+    try:
+        from torchvision import models
+    except Exception as exc:
+        raise ImportError(
+            "torchvision is required to load ResNet18. Install torchvision in the ComfyUI environment."
+        ) from exc
+
+    weights = None
+    if pretrained:
+        if not hasattr(models, "ResNet18_Weights"):
+            raise RuntimeError("This torchvision version does not expose ResNet18_Weights.")
+        weights = models.ResNet18_Weights.IMAGENET1K_V1
+
+    model = models.resnet18(weights=weights)
+    model.eval()
+    return model
+
+
 @dataclass
 class CompressionSummary:
     original_params: int
@@ -682,6 +701,26 @@ class LoadTorchModelFromStateDict:
         return (model, f"loaded from state_dict: {checkpoint_path}")
 
 
+class LoadTorchVisionResNet18:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "pretrained": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("PYTORCH_MODEL", "STRING")
+    RETURN_NAMES = ("model", "summary")
+    FUNCTION = "load"
+    CATEGORY = "DCT Compression"
+
+    def load(self, pretrained: bool):
+        model = _load_torchvision_resnet18(pretrained)
+        mode = "pretrained" if pretrained else "random-init"
+        return (model, f"loaded torchvision resnet18 ({mode})")
+
+
 class DCTCompressCNN:
     @classmethod
     def INPUT_TYPES(cls):
@@ -827,6 +866,7 @@ class RunTorchModelInference:
 NODE_CLASS_MAPPINGS = {
     "LoadTorchModel": LoadTorchModel,
     "LoadTorchModelFromStateDict": LoadTorchModelFromStateDict,
+    "LoadTorchVisionResNet18": LoadTorchVisionResNet18,
     "DCTCompressCNN": DCTCompressCNN,
     "SaveTorchModel": SaveTorchModel,
     "RunTorchModelInference": RunTorchModelInference,
@@ -836,6 +876,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LoadTorchModel": "Load Torch CNN Model",
     "LoadTorchModelFromStateDict": "Load Torch Model From State Dict",
+    "LoadTorchVisionResNet18": "Load TorchVision ResNet18",
     "DCTCompressCNN": "DCT Compress CNN",
     "SaveTorchModel": "Save Torch Model",
     "RunTorchModelInference": "Run Torch Model Inference",
