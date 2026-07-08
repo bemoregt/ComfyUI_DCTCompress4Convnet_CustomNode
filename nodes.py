@@ -308,6 +308,62 @@ def _save_model(module: nn.Module, output_path: str, file_name: str, save_to_cpu
     return str(candidate)
 
 
+def _build_linear_bucket_mapping(
+    shape: Tuple[int, int],
+    per_band: torch.Tensor,
+    band_offsets: torch.Tensor,
+    seed: int,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    out_features, in_features = shape
+    rows = torch.arange(out_features, device=device, dtype=torch.int64).unsqueeze(1)
+    cols = torch.arange(in_features, device=device, dtype=torch.int64).unsqueeze(0)
+    band_index = rows + cols
+    spatial_index = rows * in_features + cols
+
+    band_bucket_size = per_band[band_index]
+    hash_source = spatial_index + band_index * 7919 + int(seed) * 104729
+    bucket_fraction = _float_hash(hash_source, seed)
+    local_bucket = torch.floor(bucket_fraction * band_bucket_size.to(torch.float64)).to(torch.int64)
+    local_bucket = torch.minimum(local_bucket, band_bucket_size - 1)
+    global_bucket = band_offsets[band_index] + local_bucket
+
+    sign_fraction = _float_hash(hash_source + 17, seed + 1)
+    sign = torch.where(sign_fraction < 0.5, -torch.ones_like(sign_fraction), torch.ones_like(sign_fraction))
+    return global_bucket.reshape(-1), sign.reshape(-1)
+
+
+def _build_conv_bucket_mapping(
+    shape: Tuple[int, int, int, int],
+    per_band: torch.Tensor,
+    band_offsets: torch.Tensor,
+    seed: int,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    out_channels, in_channels, k_h, k_w = shape
+    per_filter = k_h * k_w
+    prefix = out_channels * in_channels
+    prefix_index = torch.arange(prefix, device=device, dtype=torch.int64).repeat_interleave(per_filter)
+    spatial_index = torch.arange(per_filter, device=device, dtype=torch.int64).repeat(prefix)
+    spatial_index = prefix_index * per_filter + spatial_index
+
+    rows = torch.arange(k_h, device=device, dtype=torch.int64).unsqueeze(1)
+    cols = torch.arange(k_w, device=device, dtype=torch.int64).unsqueeze(0)
+    spatial_band = (rows + cols).reshape(-1)
+    band_index = spatial_band.repeat(prefix)
+
+    band_bucket_size = per_band[band_index]
+    hash_source = spatial_index + band_index * 7919 + int(seed) * 104729
+    bucket_fraction = _float_hash(hash_source, seed)
+    local_bucket = torch.floor(bucket_fraction * band_bucket_size.to(torch.float64)).to(torch.int64)
+    local_bucket = torch.minimum(local_bucket, band_bucket_size - 1)
+    global_bucket = band_offsets[band_index] + local_bucket
+
+    sign_fraction = _float_hash(hash_source + 17, seed + 1)
+    sign = torch.where(sign_fraction < 0.5, -torch.ones_like(sign_fraction), torch.ones_like(sign_fraction))
+    return global_bucket.reshape(-1), sign.reshape(-1)
+
+
 def _load_torchvision_resnet18(pretrained: bool) -> nn.Module:
     try:
         from torchvision import models
@@ -382,51 +438,40 @@ class DCTCompressedLinear(nn.Module):
         for size in per_band:
             band_offsets.append(running)
             running += size
-        total_buckets = running
-
+        self._seed = int(seed)
         self.register_buffer("_band_offsets", torch.tensor(band_offsets, dtype=torch.int64, device=coeffs.device))
-        self.register_buffer("_spatial_index", self._make_spatial_index(weight.shape, coeffs.device))
-        self.register_buffer("_band_index", self._make_band_index(weight.shape, coeffs.device))
+        self.register_buffer("_per_band", torch.tensor(per_band, dtype=torch.int64, device=coeffs.device))
 
-        bucket_count = torch.tensor(per_band, dtype=torch.int64, device=coeffs.device)
-        band_bucket_size = bucket_count[self._band_index]
-        hash_source = self._spatial_index + self._band_index * 7919 + int(seed) * 104729
-        bucket_fraction = _float_hash(hash_source, seed)
-        local_bucket = torch.floor(bucket_fraction * band_bucket_size.to(torch.float64)).to(torch.int64)
-        local_bucket = torch.minimum(local_bucket, band_bucket_size - 1)
-        global_bucket = self._band_offsets[self._band_index] + local_bucket
+        global_bucket, sign = _build_linear_bucket_mapping(
+            weight.shape,
+            self._per_band,
+            self._band_offsets,
+            self._seed,
+            coeffs.device,
+        )
+        self._shape = tuple(weight.shape)
+        self._dtype = coeffs.dtype
 
-        sign_fraction = _float_hash(hash_source + 17, seed + 1)
-        sign = torch.where(sign_fraction < 0.5, -torch.ones_like(sign_fraction), torch.ones_like(sign_fraction))
-
-        self.register_buffer("_global_bucket", global_bucket.reshape(-1))
-        self.register_buffer("_sign", sign.reshape(-1).to(coeffs.dtype))
-
+        total_buckets = int(self._band_offsets[-1].item()) + int(self._per_band[-1].item())
         shared = torch.zeros(total_buckets, device=coeffs.device, dtype=coeffs.dtype)
         counts = torch.zeros(total_buckets, device=coeffs.device, dtype=coeffs.dtype)
         coeff_flat = coeffs.reshape(-1)
-        signed_coeff = self._sign * coeff_flat
-        shared.index_add_(0, self._global_bucket, signed_coeff)
-        counts.index_add_(0, self._global_bucket, torch.ones_like(coeff_flat))
+        signed_coeff = sign.to(coeffs.dtype) * coeff_flat
+        shared.index_add_(0, global_bucket, signed_coeff)
+        counts.index_add_(0, global_bucket, torch.ones_like(coeff_flat))
         shared = shared / torch.clamp(counts, min=1.0)
 
         self.shared_weights = nn.Parameter(shared, requires_grad=not freeze)
-        self.register_buffer("_counts", counts)
-
-    @staticmethod
-    def _make_spatial_index(shape: torch.Size, device: torch.device) -> torch.Tensor:
-        out_features, in_features = shape
-        return torch.arange(out_features * in_features, device=device, dtype=torch.int64).reshape(out_features, in_features)
-
-    @staticmethod
-    def _make_band_index(shape: torch.Size, device: torch.device) -> torch.Tensor:
-        out_features, in_features = shape
-        rows = torch.arange(out_features, device=device, dtype=torch.int64).unsqueeze(1)
-        cols = torch.arange(in_features, device=device, dtype=torch.int64).unsqueeze(0)
-        return rows + cols
 
     def reconstruct_weight(self) -> torch.Tensor:
-        coeff = self.shared_weights[self._global_bucket] * self._sign
+        global_bucket, sign = _build_linear_bucket_mapping(
+            self._shape,
+            self._per_band,
+            self._band_offsets,
+            self._seed,
+            self.shared_weights.device,
+        )
+        coeff = self.shared_weights[global_bucket] * sign.to(self.shared_weights.dtype)
         coeff = coeff.reshape(self._coeff_shape)
         return _idct2(coeff)
 
@@ -479,54 +524,30 @@ class DCTCompressedConv2d(nn.Module):
         for size in per_band:
             band_offsets.append(running)
             running += size
-        total_buckets = running
-
+        self._seed = int(seed)
         self.register_buffer("_band_offsets", torch.tensor(band_offsets, dtype=torch.int64, device=coeffs.device))
-        self.register_buffer("_spatial_index", self._make_spatial_index(weight.shape, coeffs.device))
-        self.register_buffer("_band_index", self._make_band_index(weight.shape, coeffs.device))
+        self.register_buffer("_per_band", torch.tensor(per_band, dtype=torch.int64, device=coeffs.device))
+        self._shape = tuple(weight.shape)
+        self._dtype = coeffs.dtype
 
-        bucket_count = torch.tensor(per_band, dtype=torch.int64, device=coeffs.device)
-        band_bucket_size = bucket_count[self._band_index]
-        hash_source = self._spatial_index + self._band_index * 7919 + int(seed) * 104729
-        bucket_fraction = _float_hash(hash_source, seed)
-        local_bucket = torch.floor(bucket_fraction * band_bucket_size.to(torch.float64)).to(torch.int64)
-        local_bucket = torch.minimum(local_bucket, band_bucket_size - 1)
-        global_bucket = self._band_offsets[self._band_index] + local_bucket
+        global_bucket, sign = _build_conv_bucket_mapping(
+            self._shape,
+            self._per_band,
+            self._band_offsets,
+            self._seed,
+            coeffs.device,
+        )
 
-        sign_fraction = _float_hash(hash_source + 17, seed + 1)
-        sign = torch.where(sign_fraction < 0.5, -torch.ones_like(sign_fraction), torch.ones_like(sign_fraction))
-
-        self.register_buffer("_global_bucket", global_bucket.reshape(-1))
-        self.register_buffer("_sign", sign.reshape(-1).to(coeffs.dtype))
-
+        total_buckets = int(self._band_offsets[-1].item()) + int(self._per_band[-1].item())
         shared = torch.zeros(total_buckets, device=coeffs.device, dtype=coeffs.dtype)
         counts = torch.zeros(total_buckets, device=coeffs.device, dtype=coeffs.dtype)
         coeff_flat = coeffs.reshape(-1)
-        signed_coeff = self._sign * coeff_flat
-        shared.index_add_(0, self._global_bucket, signed_coeff)
-        counts.index_add_(0, self._global_bucket, torch.ones_like(coeff_flat))
+        signed_coeff = sign.to(coeffs.dtype) * coeff_flat
+        shared.index_add_(0, global_bucket, signed_coeff)
+        counts.index_add_(0, global_bucket, torch.ones_like(coeff_flat))
         shared = shared / torch.clamp(counts, min=1.0)
 
         self.shared_weights = nn.Parameter(shared, requires_grad=not freeze)
-        self.register_buffer("_counts", counts)
-
-    @staticmethod
-    def _make_spatial_index(shape: torch.Size, device: torch.device) -> torch.Tensor:
-        out_channels, in_channels, k_h, k_w = shape
-        per_filter = k_h * k_w
-        prefix = out_channels * in_channels
-        prefix_index = torch.arange(prefix, device=device, dtype=torch.int64).repeat_interleave(per_filter)
-        spatial_index = torch.arange(per_filter, device=device, dtype=torch.int64).repeat(prefix)
-        return prefix_index * per_filter + spatial_index
-
-    @staticmethod
-    def _make_band_index(shape: torch.Size, device: torch.device) -> torch.Tensor:
-        _, _, k_h, k_w = shape
-        rows = torch.arange(k_h, device=device, dtype=torch.int64).unsqueeze(1)
-        cols = torch.arange(k_w, device=device, dtype=torch.int64).unsqueeze(0)
-        spatial_band = (rows + cols).reshape(-1)
-        prefix = shape[0] * shape[1]
-        return spatial_band.repeat(prefix)
 
     @staticmethod
     def _dct_weight(weight: torch.Tensor) -> torch.Tensor:
@@ -549,7 +570,14 @@ class DCTCompressedConv2d(nn.Module):
         return weight.reshape(out_channels, in_channels, k_h, k_w)
 
     def reconstruct_weight(self) -> torch.Tensor:
-        coeff = self.shared_weights[self._global_bucket] * self._sign
+        global_bucket, sign = _build_conv_bucket_mapping(
+            self._shape,
+            self._per_band,
+            self._band_offsets,
+            self._seed,
+            self.shared_weights.device,
+        )
+        coeff = self.shared_weights[global_bucket] * sign.to(self.shared_weights.dtype)
         coeff = coeff.reshape(self._coeff_shape)
         return self._idct_weight(coeff)
 
