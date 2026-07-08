@@ -7,6 +7,16 @@ scheme inspired by *Compressing Convolutional Neural Networks*.
 The compressed model remains usable for inference because each compressed layer
 reconstructs its weight tensor during `forward()`.
 
+## Screenshots
+
+### Workflow
+
+![ComfyUI workflow using the pretrained ResNet18 loader, DCT compression, and save nodes](docs/workflow.png)
+
+### File Size Comparison
+
+![Saved compressed model compared with the original ResNet18 checkpoint](docs/size-comparison.png)
+
 ## Nodes
 
 ### Load Torch CNN Model
