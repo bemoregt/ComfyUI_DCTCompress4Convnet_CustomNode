@@ -8,7 +8,7 @@ The compressed model remains usable for inference because each compressed layer
 reconstructs its weight tensor during `forward()`.
 
 Paper:
-- [Compressing Convolutional Neural Networks](https://arxiv.org/abs/1506.04449)
+- Wenlin Chen, James Wilson, Stephen Tyree, Kilian Q. Weinberger, Yixin Chen. [Compressing Convolutional Neural Networks in the Frequency Domain](https://arxiv.org/abs/1506.04449). *KDD 2016*.
 
 ## Screenshots
 
