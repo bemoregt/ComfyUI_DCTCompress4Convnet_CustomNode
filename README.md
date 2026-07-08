@@ -7,6 +7,9 @@ scheme inspired by *Compressing Convolutional Neural Networks*.
 The compressed model remains usable for inference because each compressed layer
 reconstructs its weight tensor during `forward()`.
 
+Paper:
+- [Compressing Convolutional Neural Networks](https://arxiv.org/abs/1506.04449)
+
 ## Screenshots
 
 ### Workflow
