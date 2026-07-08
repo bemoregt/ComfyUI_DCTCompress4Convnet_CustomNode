@@ -782,6 +782,8 @@ class DCTCompressCNN:
 
 
 class SaveTorchModel:
+    OUTPUT_NODE = True
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -806,6 +808,8 @@ class SaveTorchModel:
 
 
 class RunTorchModelInference:
+    OUTPUT_NODE = True
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
